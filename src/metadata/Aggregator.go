@@ -19,8 +19,8 @@ type AggregatorProvider struct {
 	itunes   Provider
 	mb       Provider
 	limit    int
-	cache    sync.Map // string -> model.SubsonicSong
-	coverMap sync.Map // string -> string (cover URL)
+	cache    sync.Map
+	coverMap sync.Map
 }
 
 func NewAggregatorProvider(country string, limit int) *AggregatorProvider {
@@ -31,6 +31,7 @@ func NewAggregatorProvider(country string, limit int) *AggregatorProvider {
 	}
 }
 
+// SearchSongs cerca i brani su iTunes e ripiega su YouTube solo se iTunes non restituisce risultati.
 func (a *AggregatorProvider) SearchSongs(ctx context.Context, query string) ([]model.SubsonicSong, error) {
 	var songs []model.SubsonicSong
 	seenIDs := make(map[string]bool)
@@ -41,33 +42,33 @@ func (a *AggregatorProvider) SearchSongs(ctx context.Context, query string) ([]m
 			if !seenIDs[s.ID] {
 				seenIDs[s.ID] = true
 				songs = append(songs, s)
-				a.cache.Store(s.ID, s)
-				if strings.HasPrefix(s.ID, "external-") {
-					a.cache.Store(strings.TrimPrefix(s.ID, "external-"), s)
-				}
-				if s.CoverArt != "" {
-					a.coverMap.Store(s.ID, s.CoverArt)
-				}
+				a.storeSongInCache(s, s.CoverArt)
 			}
 		}
 	}
 
-	ytSongs := a.searchYouTube(ctx, query)
-	for _, s := range ytSongs {
-		if !seenIDs[s.ID] {
-			seenIDs[s.ID] = true
-			songs = append(songs, s)
-			a.cache.Store(s.ID, s)
-			if strings.HasPrefix(s.ID, "external-") {
-				a.cache.Store(strings.TrimPrefix(s.ID, "external-"), s)
-			}
-			if s.CoverArt != "" {
-				a.coverMap.Store(s.ID, s.CoverArt)
+	if len(itunesSongs) == 0 {
+		ytSongs := a.searchYouTube(ctx, query)
+		for _, s := range ytSongs {
+			if !seenIDs[s.ID] {
+				seenIDs[s.ID] = true
+				songs = append(songs, s)
+				a.storeSongInCache(s, "")
 			}
 		}
 	}
 
 	return songs, nil
+}
+
+func (a *AggregatorProvider) storeSongInCache(s model.SubsonicSong, coverArt string) {
+	a.cache.Store(s.ID, s)
+	if strings.HasPrefix(s.ID, "external-") {
+		a.cache.Store(strings.TrimPrefix(s.ID, "external-"), s)
+	}
+	if coverArt != "" {
+		a.coverMap.Store(s.ID, coverArt)
+	}
 }
 
 type YTDLPFlatItem struct {
@@ -81,6 +82,7 @@ type YTDLPFlatItem struct {
 	} `json:"thumbnails"`
 }
 
+// searchYouTube cerca brani su YouTube tramite yt-dlp quando iTunes non trova corrispondenze.
 func (a *AggregatorProvider) searchYouTube(ctx context.Context, query string) []model.SubsonicSong {
 	cmdCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
@@ -96,7 +98,6 @@ func (a *AggregatorProvider) searchYouTube(ctx context.Context, query string) []
 
 	lines := strings.Split(string(output), "\n")
 	var songs []model.SubsonicSong
-
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -106,51 +107,61 @@ func (a *AggregatorProvider) searchYouTube(ctx context.Context, query string) []
 		if err := json.Unmarshal([]byte(line), &item); err != nil || item.ID == "" {
 			continue
 		}
+		songs = append(songs, a.ytdlpItemToSubsonicSong(item))
+	}
+	return songs
+}
 
-		artist := item.Channel
-		if artist == "" {
-			artist = item.Uploader
-		}
-		if artist == "" {
-			artist = "Unknown Artist"
-		}
+func (a *AggregatorProvider) ytdlpItemToSubsonicSong(item YTDLPFlatItem) model.SubsonicSong {
+	artist := item.Channel
+	if artist == "" {
+		artist = item.Uploader
+	}
+	if artist == "" {
+		artist = "Unknown Artist"
+	}
 
-		coverURL := ""
-		if len(item.Thumbnails) > 0 {
-			coverURL = item.Thumbnails[len(item.Thumbnails)-1].URL
-		}
-
-		cleanID := "yt-" + item.ID
-		externalID := "external-" + cleanID
-
-		song := model.SubsonicSong{
-			ID:                    externalID,
-			Title:                 item.Title + " (external)",
-			Artist:                artist,
-			DisplayArtist:         artist,
-			Album:                 "YouTube",
-			AlbumID:               "external-yt-album",
-			CoverArt:              externalID,
-			Duration:              item.Duration,
-			IsDir:                 false,
-			ContentType:           "audio/mpeg",
-			Suffix:                "mp3",
-			TranscodedSuffix:      "mp3",
-			TranscodedContentType: "audio/mpeg",
-			Type:                  "music",
-			MediaType:             "song",
-			Created:               time.Now(),
-			MusicBrainzId:         cleanID,
-		}
-
-		songs = append(songs, song)
+	cleanID := "yt-" + item.ID
+	externalID := "external-" + cleanID
+	if len(item.Thumbnails) > 0 {
+		coverURL := item.Thumbnails[len(item.Thumbnails)-1].URL
 		if coverURL != "" {
 			a.coverMap.Store(externalID, coverURL)
 			a.coverMap.Store(cleanID, coverURL)
 		}
 	}
 
-	return songs
+	dur := item.Duration
+	if dur <= 0 {
+		dur = 180
+	}
+	size := item.Duration * 32000
+	if size <= 0 {
+		size = 5000000
+	}
+
+	return model.SubsonicSong{
+		ID:                    externalID,
+		Parent:                "external-yt-album",
+		Title:                 "(external) " + item.Title,
+		Artist:                artist,
+		ArtistID:              "external-yt-artist-" + item.ID,
+		DisplayArtist:         artist,
+		Album:                 "YouTube",
+		AlbumID:               "external-yt-album",
+		CoverArt:              externalID,
+		Duration:              dur,
+		Size:                  size,
+		IsDir:                 false,
+		ContentType:           "audio/mpeg",
+		Suffix:                "mp3",
+		TranscodedSuffix:      "mp3",
+		TranscodedContentType: "audio/mpeg",
+		Type:                  "music",
+		MediaType:             "song",
+		Created:               time.Now(),
+		MusicBrainzId:         cleanID,
+	}
 }
 
 func (a *AggregatorProvider) SearchAlbums(ctx context.Context, query string) ([]model.SubsonicAlbum, error) {
@@ -161,6 +172,7 @@ func (a *AggregatorProvider) GetAlbumSongs(ctx context.Context, albumID string) 
 	return a.itunes.GetAlbumSongs(ctx, albumID)
 }
 
+// GetSong recupera il brano dalla cache dell'aggregatore, da iTunes o costruisce un fallback YouTube.
 func (a *AggregatorProvider) GetSong(ctx context.Context, id string) (*model.SubsonicSong, error) {
 	cleanID := strings.TrimPrefix(id, "external-")
 	if val, ok := a.cache.Load("external-" + cleanID); ok {
@@ -175,15 +187,18 @@ func (a *AggregatorProvider) GetSong(ctx context.Context, id string) (*model.Sub
 
 	if strings.HasPrefix(cleanID, "yt-") {
 		ytID := strings.TrimPrefix(cleanID, "yt-")
-		song := &model.SubsonicSong{
+		return &model.SubsonicSong{
 			ID:                    "external-" + cleanID,
+			Parent:                "external-yt-album",
 			Title:                 ytID + " (external)",
 			Artist:                "YouTube",
+			ArtistID:              "external-yt-artist-" + ytID,
 			DisplayArtist:         "YouTube",
 			Album:                 "YouTube",
 			AlbumID:               "external-yt-album",
 			CoverArt:              "external-" + cleanID,
-			Duration:              0,
+			Duration:              180,
+			Size:                  5000000,
 			IsDir:                 false,
 			ContentType:           "audio/mpeg",
 			Suffix:                "mp3",
@@ -193,8 +208,7 @@ func (a *AggregatorProvider) GetSong(ctx context.Context, id string) (*model.Sub
 			MediaType:             "song",
 			Created:               time.Now(),
 			MusicBrainzId:         cleanID,
-		}
-		return song, nil
+		}, nil
 	}
 
 	return nil, fmt.Errorf("song not found: %s", id)

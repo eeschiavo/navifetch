@@ -152,7 +152,7 @@ func (p *SubsonicReverseProxy) WaitForScanComplete(ctx context.Context, rawQuery
 	}
 }
 
-// findSongByPathInDB queries Navidrome's SQLite database directly to find a song by its file path
+// findSongByPathInDB interroga il database SQLite di Navidrome in sola lettura cercando il brano per percorso relativo.
 func findSongByPathInDB(dbPath, relativePath string) (*model.SubsonicSong, error) {
 	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
 	if err != nil {
@@ -171,75 +171,74 @@ func findSongByPathInDB(dbPath, relativePath string) (*model.SubsonicSong, error
 	return &song, nil
 }
 
-// FindNavidromeSongID resolves a downloaded song's Navidrome ID:
-// If Subsonic auth is present, trigger rescan via Subsonic API
-// Poll direct SQLite DB lookup by file path
-// Fallback: name-based search via search3 API
+func pollSongByPathInDB(ctx context.Context, dbPath, filePath string) (*model.SubsonicSong, bool) {
+	log.Printf("Polling Navidrome DB for path: %s", filePath)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for i := 0; i < 30; i++ {
+		song, err := findSongByPathInDB(dbPath, filePath)
+		if err == nil {
+			log.Printf("Found song by DB path lookup: %s - %s (ID: %s)", song.Artist, song.Title, song.ID)
+			return song, true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-ticker.C:
+		}
+	}
+	log.Printf("DB path lookup timed out after 15s for: %s", filePath)
+	return nil, false
+}
+
+// FindNavidromeSongID risolve l'ID di un brano appena scaricato avviando la scansione e interrogando DB o API search3.
 func (p *SubsonicReverseProxy) FindNavidromeSongID(cfg *config.Config, filePath string, artist string, title string, mbid string, r *http.Request) (*model.SubsonicSong, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	hasSubsonicAuth := r.URL.Query().Get("u") != ""
-
 	if hasSubsonicAuth {
 		log.Printf("Triggering Navidrome scan for new file: %s", filePath)
 		go p.SendNavidromeRequest(context.Background(), "/rest/startScan.view", r.URL.RawQuery)
 	}
 
-	// DB lookup by path
 	if cfg.NavidromeDBPath != "" && filePath != "" {
-		log.Printf("Polling Navidrome DB for path: %s", filePath)
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-
-		for i := 0; i < 30; i++ {
-			song, err := findSongByPathInDB(cfg.NavidromeDBPath, filePath)
-			if err == nil {
-				log.Printf("Found song by DB path lookup: %s - %s (ID: %s)", song.Artist, song.Title, song.ID)
-				return song, nil
-			}
-
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-ticker.C:
-			}
+		if song, ok := pollSongByPathInDB(ctx, cfg.NavidromeDBPath, filePath); ok {
+			return song, nil
 		}
-		log.Printf("DB path lookup timed out after 15s for: %s", filePath)
 	}
 
 	if !hasSubsonicAuth {
 		return nil, fmt.Errorf("song not found in Navidrome DB after download: %s - %s", artist, title)
 	}
 
+	return p.searchSongFallback(ctx, artist, title, mbid, r)
+}
+
+func (p *SubsonicReverseProxy) searchSongFallback(ctx context.Context, artist, title, mbid string, r *http.Request) (*model.SubsonicSong, error) {
 	query := fmt.Sprintf("%s %s", artist, title)
 	searchParams := r.URL.Query()
 	searchParams.Set("query", query)
 	searchRawQuery := searchParams.Encode()
 
 	log.Printf("Searching Navidrome via search3 fallback for: %s (MBID: %s)", query, mbid)
-
 	for i := 0; i < 5; i++ {
 		searchResult, _, err := p.SearchNavidrome(ctx, "/rest/search3.view", searchRawQuery)
 		if err == nil {
 			for _, song := range searchResult {
 				if mbid != "" && song.MusicBrainzId == mbid {
-					log.Printf("Found match by MBID: %s (ID: %s)", song.Title, song.ID)
 					return &song, nil
 				}
 				if strings.EqualFold(song.Artist, artist) && strings.EqualFold(song.Title, title) {
-					log.Printf("Found match by Artist/Title: %s - %s (ID: %s)", song.Artist, song.Title, song.ID)
 					return &song, nil
 				}
 			}
 		}
-
 		if i < 4 {
-			log.Printf("Match not found yet, retrying in 2s... (attempt %d/5)", i+1)
 			time.Sleep(2 * time.Second)
 			go p.SendNavidromeRequest(context.Background(), "/rest/startScan.view", r.URL.RawQuery)
 		}
 	}
-
 	return nil, fmt.Errorf("song not found in Navidrome after download: %s - %s", artist, title)
 }

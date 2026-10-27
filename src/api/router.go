@@ -13,6 +13,7 @@ func RegisterRoutes(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("/rest/search3", h.SmartSearch)
 	mux.HandleFunc("/rest/search2", h.SmartSearch)
 	mux.HandleFunc("/rest/search", h.SmartSearch)
+	mux.HandleFunc("/rest/getAlbum.view", h.GetAlbum)
 	mux.HandleFunc("/rest/getAlbum", h.GetAlbum)
 
 	mux.HandleFunc("/rest/getCoverArt.view", h.ProxyCoverArt)

@@ -9,11 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GerardPolloRebozado/navifetch/src/config"
 	"github.com/GerardPolloRebozado/navifetch/src/model"
 )
 
-// HTTPGet is a simple helper to make GET requests.
+// HTTPGet esegue una richiesta HTTP GET con timeout e header personalizzati.
 func HTTPGet(ctx context.Context, url string, headers map[string]string) (body []byte, status int, contentType string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -39,20 +38,45 @@ func HTTPGet(ctx context.Context, url string, headers map[string]string) (body [
 	return b, resp.StatusCode, resp.Header.Get("Content-Type"), nil
 }
 
-func GetTrackPath(cfg *config.Config, artist, album, title string, permanent bool) string {
-	safeArtist := SanitizeFilename(artist)
-	safeAlbum := SanitizeFilename(album)
-	safeTitle := SanitizeFilename(title)
-	folder := "cached"
-	if permanent {
-		folder = "downloads"
+// CleanExternalSuffix rimuove il marcatore "(external)" (sia prefisso che suffisso) e l'eventuale suffisso "[...]" aggiunto per Amperfy.
+func CleanExternalSuffix(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "(external) ")
+	s = strings.TrimPrefix(s, "(external)")
+	s = strings.TrimSuffix(s, " (external)")
+	s = strings.TrimSuffix(s, "(external)")
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "]") {
+		if idx := strings.LastIndex(s, " ["); idx != -1 {
+			s = s[:idx]
+		}
 	}
-
-	dir := filepath.Join(cfg.MusicLibraryPath, folder, safeArtist, safeAlbum)
-	filename := fmt.Sprintf("%s.mp3", safeTitle)
-	return filepath.Join(dir, filename)
+	return strings.TrimSpace(s)
 }
 
+// GetTrackPath costruisce il percorso su disco del brano secondo la struttura Artista/Album/Titolo.mp3.
+func GetTrackPath(libPath, artist, album, title string, permanent bool) string {
+	safeArtist := SanitizeFilename(CleanExternalSuffix(artist))
+	if safeArtist == "" {
+		safeArtist = "Unknown"
+	}
+	safeAlbum := SanitizeFilename(CleanExternalSuffix(album))
+	if safeAlbum == "" {
+		safeAlbum = "Unknown"
+	}
+	safeTitle := SanitizeFilename(CleanExternalSuffix(title))
+	if safeTitle == "" {
+		safeTitle = "Unknown"
+	}
+
+	filename := fmt.Sprintf("%s.mp3", safeTitle)
+	if permanent {
+		return filepath.Join(libPath, safeArtist, safeAlbum, filename)
+	}
+	return filepath.Join(libPath, "cached", safeArtist, safeAlbum, filename)
+}
+
+// SanitizeFilename sostituisce i caratteri non validi per il filesystem con un trattino.
 func SanitizeFilename(s string) string {
 	s = strings.ReplaceAll(s, "/", "-")
 	s = strings.ReplaceAll(s, "\\", "-")
@@ -66,10 +90,11 @@ func SanitizeFilename(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// IsSongInSubsonicSongList verifica se un titolo è già presente nella lista di brani Subsonic.
 func IsSongInSubsonicSongList(name string, subsonicList []model.SubsonicSong) bool {
-	cleanName := strings.ToLower(strings.TrimSpace(name))
+	cleanName := strings.ToLower(CleanExternalSuffix(name))
 	for _, song := range subsonicList {
-		if cleanName == strings.ToLower(strings.TrimSpace(song.Title)) {
+		if cleanName == strings.ToLower(CleanExternalSuffix(song.Title)) {
 			return true
 		}
 	}

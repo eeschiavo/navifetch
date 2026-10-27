@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GerardPolloRebozado/navifetch/src/model"
@@ -18,6 +19,7 @@ type ItunesProvider struct {
 	client  *itunes.Client
 	country string
 	limit   int
+	cache   sync.Map
 }
 
 func NewItunesProvider(country string, limit int) *ItunesProvider {
@@ -59,7 +61,7 @@ func (p *ItunesProvider) SearchAlbums(ctx context.Context, query string) ([]mode
 }
 
 func (p *ItunesProvider) GetAlbumSongs(ctx context.Context, albumID string) ([]model.SubsonicSong, error) {
-	parsedId, err := strconv.ParseInt(albumID, 10, 32)
+	parsedId, err := strconv.ParseInt(albumID, 10, 64)
 	if err != nil {
 		return nil, err
 	}
@@ -69,13 +71,26 @@ func (p *ItunesProvider) GetAlbumSongs(ctx context.Context, albumID string) ([]m
 	}
 	songs := make([]model.SubsonicSong, 0)
 	for _, song := range res.Results {
-		songs = append(songs, p.ItunesSongToSubsonicSong(song))
+		if song.WrapperType == "track" || song.TrackId != 0 {
+			songs = append(songs, p.ItunesSongToSubsonicSong(song))
+		}
 	}
 	return songs, nil
 }
 
+// GetSong recupera i metadati del brano dalla cache in memoria oppure tramite lookup su iTunes.
 func (p *ItunesProvider) GetSong(ctx context.Context, id string) (*model.SubsonicSong, error) {
-	parsedId, err := strconv.ParseInt(id, 10, 32)
+	cleanID := strings.TrimPrefix(id, "external-")
+	if val, ok := p.cache.Load(id); ok {
+		song := val.(model.SubsonicSong)
+		return &song, nil
+	}
+	if val, ok := p.cache.Load(cleanID); ok {
+		song := val.(model.SubsonicSong)
+		return &song, nil
+	}
+
+	parsedId, err := strconv.ParseInt(cleanID, 10, 64)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +112,8 @@ func (p *ItunesProvider) GetCoverArt(ctx context.Context, id string, _ int64) ([
 		return body, contentType, err
 	}
 
-	parsedId, err := strconv.ParseInt(id, 10, 32)
+	cleanID := strings.TrimPrefix(id, "external-")
+	parsedId, err := strconv.ParseInt(cleanID, 10, 64)
 	if err != nil {
 		return nil, "", err
 	}
@@ -108,13 +124,14 @@ func (p *ItunesProvider) GetCoverArt(ctx context.Context, id string, _ int64) ([
 	if len(res.Results) == 0 {
 		return nil, "", fmt.Errorf("song not found")
 	}
-	coverURL := res.Results[0].ArtworkUrl100
+	coverURL := strings.ReplaceAll(res.Results[0].ArtworkUrl100, "100x100bb", "600x600bb")
 	body, _, contentType, err := util.HTTPGet(ctx, coverURL, nil)
 	return body, contentType, err
 }
 
 func (p *ItunesProvider) GetAlbum(ctx context.Context, id string) (*model.SubsonicAlbum, error) {
-	parsedId, err := strconv.ParseInt(id, 10, 32)
+	cleanID := strings.TrimPrefix(id, "external-")
+	parsedId, err := strconv.ParseInt(cleanID, 10, 64)
 	if err != nil {
 		return nil, err
 	}
@@ -129,19 +146,30 @@ func (p *ItunesProvider) GetAlbum(ctx context.Context, id string) (*model.Subson
 	return &album, nil
 }
 
+// ItunesSongToSubsonicSong converte un risultato iTunes in SubsonicSong con copertina HD e dimensione valida per Amperfy.
 func (p *ItunesProvider) ItunesSongToSubsonicSong(rec itunes.Result) model.SubsonicSong {
-	return model.SubsonicSong{
-		Parent:                rec.CollectionName,
+	artURL := strings.ReplaceAll(rec.ArtworkUrl100, "100x100bb", "600x600bb")
+	duration := rec.TrackTimeMillis / 1000
+	if duration <= 0 {
+		duration = 180
+	}
+	size := (duration * 256000) / 8
+	if size <= 0 {
+		size = 5000000
+	}
+
+	song := model.SubsonicSong{
+		Parent:                fmt.Sprintf("external-%d", rec.CollectionId),
 		ID:                    fmt.Sprintf("external-%d", rec.TrackId),
-		Title:                 rec.TrackName + " (external)",
+		Title:                 "(external) " + rec.TrackName,
 		Artist:                rec.ArtistName,
 		ArtistID:              fmt.Sprintf("external-%d", rec.ArtistId),
 		Album:                 rec.CollectionName,
 		AlbumID:               fmt.Sprintf("external-%d", rec.CollectionId),
 		Genre:                 rec.PrimaryGenreName,
-		CoverArt:              "external-" + url.QueryEscape(rec.ArtworkUrl100),
-		Duration:              rec.TrackTimeMillis / 1000,
-		Size:                  ((rec.TrackTimeMillis / 1000) * 160000) / 8,
+		CoverArt:              "external-" + url.QueryEscape(artURL),
+		Duration:              duration,
+		Size:                  size,
 		IsDir:                 false,
 		IsVideo:               false,
 		Suffix:                "mp3",
@@ -157,15 +185,18 @@ func (p *ItunesProvider) ItunesSongToSubsonicSong(rec itunes.Result) model.Subso
 		Bpm:                   1,
 		Comment:               "itunes",
 		SortName:              rec.TrackName,
-		MusicBrainzId:         "",
 		DisplayArtist:         rec.ArtistName,
 		DisplayAlbumArtist:    rec.ArtistName,
 		DisplayComposer:       rec.ArtistName,
 		ExplicitStatus:        "clean",
 	}
+	p.cache.Store(song.ID, song)
+	p.cache.Store(strings.TrimPrefix(song.ID, "external-"), song)
+	return song
 }
 
 func (p *ItunesProvider) ItunesAlbumToSubsonicAlbum(rec itunes.Result) model.SubsonicAlbum {
+	artURL := strings.ReplaceAll(rec.ArtworkUrl100, "100x100bb", "600x600bb")
 	return model.SubsonicAlbum{
 		ID:        fmt.Sprintf("external-%d", rec.CollectionId),
 		Parent:    fmt.Sprintf("external-%d", rec.ArtistId),
@@ -173,7 +204,7 @@ func (p *ItunesProvider) ItunesAlbumToSubsonicAlbum(rec itunes.Result) model.Sub
 		Title:     rec.CollectionName,
 		Name:      rec.CollectionName,
 		IsDir:     true,
-		CoverArt:  "external-" + url.QueryEscape(rec.ArtworkUrl100),
+		CoverArt:  "external-" + url.QueryEscape(artURL),
 		SongCount: int64(rec.TrackCount),
 		Created:   time.Now(),
 		ArtistID:  fmt.Sprintf("external-%d", rec.ArtistId),

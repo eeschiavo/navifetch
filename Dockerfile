@@ -16,6 +16,7 @@ FROM alpine:latest
 RUN apk add --no-cache \
     ffmpeg \
     python3 \
+    deno \
     ca-certificates \
     curl
 
