@@ -37,6 +37,16 @@ func (s *AlbumService) GetAlbum(ctx context.Context, albumID string, path string
 		if err != nil {
 			log.Printf("Error fetching external album songs %s: %v", albumID, err)
 		}
+		var totalDur int
+		for i := range songs {
+			songs[i].Album = album.Name
+			songs[i].AlbumID = album.ID
+			songs[i].Parent = album.ID
+			totalDur += int(songs[i].Duration)
+			s.metadata.CacheSong(songs[i])
+		}
+		album.SongCount = int64(len(songs))
+		album.Duration = totalDur
 
 		subsonicAlbumResponse.Subsonic.Status = "ok"
 		subsonicAlbumResponse.Subsonic.Version = "1.16.1"

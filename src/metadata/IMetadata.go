@@ -14,6 +14,7 @@ type Provider interface {
 	GetSong(ctx context.Context, id string) (*model.SubsonicSong, error)
 	GetAlbum(ctx context.Context, id string) (*model.SubsonicAlbum, error)
 	GetCoverArt(ctx context.Context, id string, size int64) ([]byte, string, error)
+	CacheSong(song model.SubsonicSong)
 }
 
 var metadataProvider Provider

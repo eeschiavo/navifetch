@@ -24,6 +24,7 @@ type Handler struct {
 	rp            *service.SubsonicReverseProxy
 	metadata      metadata.Provider
 	albumService  *service.AlbumService
+	chartsService *service.ChartsService
 	searchService *service.SearchService
 	songService   *service.SongService
 	streamService *service.StreamService
@@ -34,13 +35,16 @@ func NewHandler(cfg *config.Config, rp *service.SubsonicReverseProxy) *Handler {
 	if err != nil {
 		log.Fatalf("Failed to initialize metadata provider: %v", err)
 	}
-	return &Handler{
+	h := &Handler{
 		cfg: cfg, rp: rp, metadata: p,
 		albumService:  service.NewAlbumService(rp, p),
+		chartsService: service.NewChartsService(p),
 		searchService: service.NewSearchService(rp, p),
 		songService:   service.NewSongService(rp, p),
 		streamService: service.NewStreamService(cfg, p),
 	}
+	go h.chartsService.Warmup()
+	return h
 }
 
 func (h *Handler) Healthz(w http.ResponseWriter, _ *http.Request) {
@@ -276,24 +280,6 @@ func (h *Handler) ProxyCoverArt(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(image)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(image)
-}
-
-func (h *Handler) GetAlbum(w http.ResponseWriter, r *http.Request) {
-	albumId := r.URL.Query().Get("id")
-	if !strings.HasPrefix(albumId, "external-") {
-		h.rp.ServeHTTP(w, r)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-	defer cancel()
-	resp, err := h.albumService.GetAlbum(ctx, albumId, r.URL.Path, r.URL.RawQuery)
-	if err != nil {
-		http.Error(w, "Failed to fetch album", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (h *Handler) CatchAll(w http.ResponseWriter, r *http.Request) { h.rp.ServeHTTP(w, r) }

@@ -61,6 +61,12 @@ func (a *AggregatorProvider) SearchSongs(ctx context.Context, query string) ([]m
 	return songs, nil
 }
 
+// CacheSong salva un brano nella cache dell'aggregatore e del provider iTunes sottostante.
+func (a *AggregatorProvider) CacheSong(s model.SubsonicSong) {
+	a.storeSongInCache(s, s.CoverArt)
+	a.itunes.CacheSong(s)
+}
+
 func (a *AggregatorProvider) storeSongInCache(s model.SubsonicSong, coverArt string) {
 	a.cache.Store(s.ID, s)
 	if strings.HasPrefix(s.ID, "external-") {
@@ -140,13 +146,14 @@ func (a *AggregatorProvider) ytdlpItemToSubsonicSong(item YTDLPFlatItem) model.S
 		size = 5000000
 	}
 
+	extArtist := "(external) " + artist
 	return model.SubsonicSong{
 		ID:                    externalID,
 		Parent:                "external-yt-album",
-		Title:                 "(external) " + item.Title,
-		Artist:                artist,
+		Title:                 item.Title,
+		Artist:                extArtist,
 		ArtistID:              "external-yt-artist-" + item.ID,
-		DisplayArtist:         artist,
+		DisplayArtist:         extArtist,
 		Album:                 "YouTube",
 		AlbumID:               "external-yt-album",
 		CoverArt:              externalID,

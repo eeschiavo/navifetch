@@ -105,6 +105,9 @@ func (p *MusicBrainzProvider) GetSong(ctx context.Context, id string) (*model.Su
 	return &song, nil
 }
 
+// CacheSong soddisfa l'interfaccia Provider per MusicBrainz.
+func (p *MusicBrainzProvider) CacheSong(_ model.SubsonicSong) {}
+
 func (p *MusicBrainzProvider) GetCoverArt(ctx context.Context, id string, size int64) ([]byte, string, error) {
 	url, err := GetCoverArtArchive(ctx, id, size)
 	if err != nil {

@@ -33,8 +33,8 @@ func LoadConfig() (*Config, error) {
 
 	libPath := getEnv("MUSIC_LIBRARY_PATH", "/music")
 	giuliaLibPath := getEnv("GIULIA_MUSIC_LIBRARY_PATH", "/music-giulia")
-	var limit = 10
-	if l := getEnv("RESULTS_PER_PAGE", "10"); l != "" {
+	var limit = 5
+	if l := getEnv("RESULTS_PER_PAGE", "5"); l != "" {
 		if parsed, err := strconv.ParseInt(l, 10, 8); err == nil {
 			limit = int(parsed)
 		}

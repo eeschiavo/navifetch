@@ -158,11 +158,12 @@ func (p *ItunesProvider) ItunesSongToSubsonicSong(rec itunes.Result) model.Subso
 		size = 5000000
 	}
 
+	extArtist := "(external) " + rec.ArtistName
 	song := model.SubsonicSong{
 		Parent:                fmt.Sprintf("external-%d", rec.CollectionId),
 		ID:                    fmt.Sprintf("external-%d", rec.TrackId),
-		Title:                 "(external) " + rec.TrackName,
-		Artist:                rec.ArtistName,
+		Title:                 rec.TrackName,
+		Artist:                extArtist,
 		ArtistID:              fmt.Sprintf("external-%d", rec.ArtistId),
 		Album:                 rec.CollectionName,
 		AlbumID:               fmt.Sprintf("external-%d", rec.CollectionId),
@@ -185,14 +186,20 @@ func (p *ItunesProvider) ItunesSongToSubsonicSong(rec itunes.Result) model.Subso
 		Bpm:                   1,
 		Comment:               "itunes",
 		SortName:              rec.TrackName,
-		DisplayArtist:         rec.ArtistName,
-		DisplayAlbumArtist:    rec.ArtistName,
+		DisplayArtist:         extArtist,
+		DisplayAlbumArtist:    extArtist,
 		DisplayComposer:       rec.ArtistName,
 		ExplicitStatus:        "clean",
 	}
 	p.cache.Store(song.ID, song)
 	p.cache.Store(strings.TrimPrefix(song.ID, "external-"), song)
 	return song
+}
+
+// CacheSong salva un brano nella cache in memoria del provider iTunes.
+func (p *ItunesProvider) CacheSong(song model.SubsonicSong) {
+	p.cache.Store(song.ID, song)
+	p.cache.Store(strings.TrimPrefix(song.ID, "external-"), song)
 }
 
 func (p *ItunesProvider) ItunesAlbumToSubsonicAlbum(rec itunes.Result) model.SubsonicAlbum {
@@ -208,7 +215,7 @@ func (p *ItunesProvider) ItunesAlbumToSubsonicAlbum(rec itunes.Result) model.Sub
 		SongCount: int64(rec.TrackCount),
 		Created:   time.Now(),
 		ArtistID:  fmt.Sprintf("external-%d", rec.ArtistId),
-		Artist:    rec.ArtistName,
+		Artist:    "(external) " + rec.ArtistName,
 		Genre:     rec.PrimaryGenreName,
 	}
 }

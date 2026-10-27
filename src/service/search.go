@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/GerardPolloRebozado/navifetch/src/metadata"
 	"github.com/GerardPolloRebozado/navifetch/src/model"
@@ -14,8 +17,9 @@ import (
 )
 
 type SearchService struct {
-	rp       *SubsonicReverseProxy
-	metadata metadata.Provider
+	rp        *SubsonicReverseProxy
+	metadata  metadata.Provider
+	searchSeq sync.Map
 }
 
 func NewSearchService(rp *SubsonicReverseProxy, metadata metadata.Provider) *SearchService {
@@ -25,13 +29,41 @@ func NewSearchService(rp *SubsonicReverseProxy, metadata metadata.Provider) *Sea
 	}
 }
 
-// SmartSearch unisce i risultati locali di Navidrome con quelli esterni adattando i titoli per Amperfy.
+// shouldSearchExternal applica una soglia minima di 3 caratteri e un debounce di 650ms per utente.
+func (s *SearchService) shouldSearchExternal(ctx context.Context, user, query string) bool {
+	if len(strings.TrimSpace(query)) < 3 {
+		return false
+	}
+	if user == "" {
+		user = "default"
+	}
+	val, _ := s.searchSeq.LoadOrStore(user, &atomic.Uint64{})
+	counter := val.(*atomic.Uint64)
+	mySeq := counter.Add(1)
+
+	select {
+	case <-time.After(650 * time.Millisecond):
+	case <-ctx.Done():
+		return false
+	}
+	return counter.Load() == mySeq
+}
+
+// SmartSearch unisce i risultati locali di Navidrome con quelli esterni (con debounce) adattando i titoli per Amperfy.
 func (s *SearchService) SmartSearch(ctx context.Context, query string, path string, rawQuery string) ([]byte, string, error) {
 	subsonicSongs, _, _ := s.rp.SearchNavidrome(ctx, path, rawQuery)
 
-	externalSongs, err := s.metadata.SearchSongs(ctx, query)
-	if err != nil {
-		externalSongs = nil
+	u, _ := url.ParseQuery(rawQuery)
+	format := u.Get("f")
+	user := u.Get("u")
+
+	var externalSongs []model.SubsonicSong
+	if s.shouldSearchExternal(ctx, user, query) {
+		var err error
+		externalSongs, err = s.metadata.SearchSongs(ctx, query)
+		if err != nil {
+			externalSongs = nil
+		}
 	}
 
 	allSongs := make([]model.SubsonicSong, 0, len(subsonicSongs)+len(externalSongs))
@@ -44,9 +76,6 @@ func (s *SearchService) SmartSearch(ctx context.Context, query string, path stri
 		songCopy := formatExternalTitleForAmperfy(ext, query)
 		allSongs = append(allSongs, songCopy)
 	}
-
-	u, _ := url.ParseQuery(rawQuery)
-	format := u.Get("f")
 
 	if format == "xml" || format == "" {
 		xmlBody := WrapExternalSearchXML(allSongs)
@@ -88,15 +117,19 @@ func stripAccents(s string) string {
 	return r.Replace(strings.ToLower(s))
 }
 
-// formatExternalTitleForAmperfy premette "(external) " al titolo pulito senza ripetere il nome dell'artista.
+// formatExternalTitleForAmperfy lascia il titolo pulito (con eventuale "[query]" per il filtro Amperfy) e "(external) " davanti all'artista.
 func formatExternalTitleForAmperfy(s model.SubsonicSong, query string) model.SubsonicSong {
 	cleanTitle := util.CleanExternalSuffix(s.Title)
+	cleanArtist := util.CleanExternalSuffix(s.Artist)
+	s.Artist = "(external) " + cleanArtist
+	s.DisplayArtist = s.Artist
+
 	qNorm := stripAccents(strings.TrimSpace(query))
 	if qNorm == "" || strings.Contains(stripAccents(cleanTitle), qNorm) {
-		s.Title = fmt.Sprintf("(external) %s", cleanTitle)
+		s.Title = cleanTitle
 		return s
 	}
-	s.Title = fmt.Sprintf("(external) %s [%s]", cleanTitle, strings.TrimSpace(query))
+	s.Title = fmt.Sprintf("%s [%s]", cleanTitle, strings.TrimSpace(query))
 	return s
 }
 
@@ -155,6 +188,10 @@ func WrapSingleSongXML(s *model.SubsonicSong) []byte {
 }
 
 func songToXMLTag(s model.SubsonicSong) string {
+	return songToXMLNamedTag("song", s)
+}
+
+func songToXMLNamedTag(tagName string, s model.SubsonicSong) string {
 	parent := s.Parent
 	if parent == "" {
 		parent = s.AlbumID
@@ -179,8 +216,8 @@ func songToXMLTag(s model.SubsonicSong) string {
 		size = 5000000
 	}
 	return fmt.Sprintf(
-		`<song id="%s" parent="%s" title="%s" artist="%s" artistId="%s" album="%s" albumId="%s" genre="%s" duration="%d" size="%d" bitRate="256" coverArt="%s" isDir="false" isVideo="false" suffix="mp3" contentType="audio/mpeg" type="music" mediaType="song" created="2026-01-01T00:00:00.000Z"/>`,
-		xmlEscape(s.ID), xmlEscape(parent), xmlEscape(s.Title), xmlEscape(s.Artist), xmlEscape(artistID),
+		`<%s id="%s" parent="%s" title="%s" artist="%s" artistId="%s" album="%s" albumId="%s" genre="%s" duration="%d" size="%d" bitRate="256" coverArt="%s" isDir="false" isVideo="false" suffix="mp3" contentType="audio/mpeg" type="music" mediaType="song" created="2026-01-01T00:00:00.000Z"/>`,
+		tagName, xmlEscape(s.ID), xmlEscape(parent), xmlEscape(s.Title), xmlEscape(s.Artist), xmlEscape(artistID),
 		xmlEscape(s.Album), xmlEscape(albumID), xmlEscape(s.Genre), duration, size, xmlEscape(s.CoverArt),
 	)
 }

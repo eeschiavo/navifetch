@@ -54,7 +54,7 @@ func CleanExternalSuffix(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// GetTrackPath costruisce il percorso su disco del brano secondo la struttura Artista/Album/Titolo.mp3.
+// GetTrackPath costruisce il percorso su disco del brano in downloaded/Artista/Album/Titolo.mp3 (o cached/...).
 func GetTrackPath(libPath, artist, album, title string, permanent bool) string {
 	safeArtist := SanitizeFilename(CleanExternalSuffix(artist))
 	if safeArtist == "" {
@@ -71,7 +71,7 @@ func GetTrackPath(libPath, artist, album, title string, permanent bool) string {
 
 	filename := fmt.Sprintf("%s.mp3", safeTitle)
 	if permanent {
-		return filepath.Join(libPath, safeArtist, safeAlbum, filename)
+		return filepath.Join(libPath, "downloaded", safeArtist, safeAlbum, filename)
 	}
 	return filepath.Join(libPath, "cached", safeArtist, safeAlbum, filename)
 }
